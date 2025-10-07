@@ -1,4 +1,5 @@
 just run 
 
-```npm install```
+```npm install``` \
+then \
 ```node index```
