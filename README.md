@@ -1,5 +1,5 @@
 just run 
 
-```npm install``` \
+```npm install```to install all dependencies \
 then \
-```node index```
+```node index``` to start server
