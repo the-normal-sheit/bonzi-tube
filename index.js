@@ -2,17 +2,19 @@ var express = require("express");
 var app = express();
 var http = require("http").createServer(app);
 var io = require("socket.io")(http);
+let cors = require('cors');
 var fs = require("fs");
-const path = require('path');
+var path = require('path');
 let bans = require('./bans');
 var config = JSON.parse(fs.readFileSync("./config.json",{encoding:'utf-8'}));
 let catalogue = require('./catalogue');
 let whitelist = ["https://files.catbox.moe","./img/"];
 let thumbnailforms = [".png",".jpg",".jpeg"];
+app.use(cors());
 app.use(express.static("public"));
 http.listen(config.port, () => { console.log(`Bonzitube is listening at localhost:${http.address().port}`); });
 
-const blacklist = [
+var blacklist = [
     "<script>",
     "<a href='javascript:",
     '<a href="javascript:',
@@ -33,13 +35,23 @@ const blacklist = [
     '.innerHTML = "',
     ".innerHTML = ",
 ];
-let msgs = [`<b>Welcome to BonziTUBE bulletin board. You can scroll down to see user messages.</b><br>`];
-const adminPass = "biaclvb69!@";
-const Utils = {
+let msgs = [
+`<b>
+Welcome to BonziBOARD. 
+</b><br>
+`
+];
+var adminPass = "biaclvb69!@";
+var Utils = {
     sanitizeString:(str)=>{
         if(typeof str !== "string")str = '';
         str = str.replaceAll('"','\\"');
-        str = decodeURIComponent(JSON.parse('"'+str+'"')); //shitty hack for preventing unicode escape
+        str = str.replace(/[\x00-\x1F\x7F]/g, '');
+        try {
+            str = decodeURIComponent(JSON.parse('"'+str+'"'));
+        } catch(e) {
+            str = str.replaceAll('\\"','"');
+        }
         for(let i=0;i<blacklist.length;i++){
             let satan = blacklist[i];
             if(str.includes(satan))str = str.replaceAll(satan,"");
@@ -56,9 +68,11 @@ const Utils = {
     getJSON:(file)=>{
         let newJSON = undefined;
         try {
-
             let e = fs.readFileSync(file,{encoding:'utf-8'});
-            newJSON = JSON.parse(e);} catch(e){newJSON = undefined;}
+            newJSON = JSON.parse(e);
+        } catch(e){
+            newJSON = undefined;
+        }
         return newJSON;
     },
     averageSet:(array)=>{
@@ -72,6 +86,82 @@ const Utils = {
 let mostViewed = [];
 let globalChat = ``;
 let maxDate = 0;
+
+function getComments(videoId){
+    let allComments = Utils.getJSON('./comments.json') || {};
+    return allComments[videoId] || [];
+}
+
+function saveComment(videoId, comment){
+    let allComments = Utils.getJSON('./comments.json') || {};
+    if(!allComments[videoId]){
+        allComments[videoId] = [];
+    }
+    allComments[videoId].push(comment);
+    fs.writeFileSync('./comments.json', JSON.stringify(allComments), 'utf-8');
+}
+
+function deleteComment(videoId, commentId){
+    let allComments = Utils.getJSON('./comments.json') || {};
+    if(!allComments[videoId])return false;
+    
+    let filteredComments = allComments[videoId].filter(comment => comment.id !== commentId);
+    
+    if(filteredComments.length === allComments[videoId].length)return false;
+    
+    allComments[videoId] = filteredComments;
+    fs.writeFileSync('./comments.json', JSON.stringify(allComments), 'utf-8');
+    return true;
+}
+
+function likeComment(videoId, commentId, ip, type){
+    let allComments = Utils.getJSON('./comments.json') || {};
+    if(!allComments[videoId])return false;
+    
+    let commentIndex = allComments[videoId].findIndex(c => c.id === commentId);
+    if(commentIndex === -1)return false;
+    
+    let comment = allComments[videoId][commentIndex];
+    
+    if(!comment.likes)comment.likes = [];
+    if(!comment.dislikes)comment.dislikes = [];
+    
+    let likeIndex = comment.likes.indexOf(ip);
+    let dislikeIndex = comment.dislikes.indexOf(ip);
+    
+    if(type === "like"){
+        if(likeIndex !== -1){
+            comment.likes.splice(likeIndex, 1);
+        } else {
+            if(dislikeIndex !== -1){
+                comment.dislikes.splice(dislikeIndex, 1);
+            }
+            comment.likes.push(ip);
+        }
+    } else if(type === "dislike"){
+        if(dislikeIndex !== -1){
+            comment.dislikes.splice(dislikeIndex, 1);
+        } else {
+            if(likeIndex !== -1){
+                comment.likes.splice(likeIndex, 1);
+            }
+            comment.dislikes.push(ip);
+        }
+    }
+    
+    allComments[videoId][commentIndex] = comment;
+    fs.writeFileSync('./comments.json', JSON.stringify(allComments), 'utf-8');
+    return true;
+}
+
+function getRating(videoId){
+    let ratingsFile = Utils.getJSON('./user_cont/ratings/$'+videoId.replace('#','')+'.json');
+    if(!ratingsFile)return 0;
+    let ratings = Object.values(ratingsFile);
+    if(ratings.length === 0)return 0;
+    return Utils.averageSet(ratings);
+}
+
 function compileMostViewed(){
     let result = [];
     fs.readdir(__dirname+'/user_cont/videos', (err, files) => {
@@ -82,24 +172,10 @@ function compileMostViewed(){
         let archive = Utils.getJSON('archive.json');
         files.forEach(file => {
             let videoCont = Utils.getJSON("./user_cont/videos/"+file);
-            let thisRating = Utils.getJSON("./user_cont/ratings/"+file.replace("#","$"));
-            if(thisRating !== undefined){
-                let ratings = Object.keys(thisRating);
-                let r = [];
-                ratings.forEach(ip => {
-                    r = [...r,thisRating[ip]];
-                });
-                thisRating = r;
-                let sum = 0;
-                thisRating.forEach(rate => {sum+=rate;});
-                thisRating = Math.min(Math.round(sum / thisRating.length),5);
-            } else {
-                thisRating = 0;
-            }
-            videoCont["stars"] = thisRating;
+            let thisRating = getRating(videoCont["id"]);
+            videoCont["stars"] = thisRating || 0;
             if(videoCont["creator"] !== undefined)delete videoCont["creator"];
             if(videoCont["timestamp"] == undefined)videoCont["timestamp"]="Unknown";
-            console.log(videoCont);
             result = [...result,videoCont];
         });
         result.sort((a,b) => b.views-a.views);
@@ -108,6 +184,7 @@ function compileMostViewed(){
         maxDate = e[0]["date"];
     });
 }
+
 function updateVideo(videoName,videoObject){
     fs.readdir(__dirname+'/user_cont/videos',(err,files)=>{
         if(err)console.error(err);
@@ -119,17 +196,18 @@ function updateVideo(videoName,videoObject){
         }
     });
 }
+
 function updateCatalogue(ip){
     catalogue.ips[ip] = catalogue.ips[ip] == undefined ? [] : catalogue.ips[ip];
     fs.writeFileSync('./catalogue.js',`module.exports = {titles:${JSON.stringify(catalogue.titles)},ips:${JSON.stringify(catalogue.ips)}}`,'utf-8');
 }
+
 function updateArchive(newArchive){
     if(newArchive == undefined){
     let archive = Utils.getJSON("./archive.json");
     fs.readdir(__dirname+'/user_cont/videos',(err,files)=>{
         archive.forEach(video => {
             if(!files.includes(video["id"]+'.json')){
-
             fs.writeFile('./user_cont/videos/'+video["id"]+'.json', `
             {
             "title":"${video.title}",
@@ -139,6 +217,7 @@ function updateArchive(newArchive){
             "type":"mp4",
             "src":"${video.src}",
             "date":${video.date},
+			"stars":${video.stars || 0},
             "thumbnail":"${video.thumbnail}",
             "creator":"Unknown",
             "timestamp":"${video.timestamp}"
@@ -150,7 +229,6 @@ function updateArchive(newArchive){
                 console.log('File created successfully!');
             }
             });
-
             } else {
                 let videoPath = "./user_cont/videos/"+video["id"]+".json"
                 let newVideo = Utils.getJSON(videoPath);
@@ -164,6 +242,7 @@ function updateArchive(newArchive){
         fs.writeFileSync('archive.json',JSON.stringify(newArchive),'utf-8');
     }
 }
+
 app.get('/video', async (req, res) => {
     try {
         let acceptHeader = req.get('Accept') || '';
@@ -229,6 +308,7 @@ app.get('/video', async (req, res) => {
                     if (thisVideo && thisVideo["creator"] !== undefined) {
                         delete thisVideo["creator"];
                     }
+					thisVideo["stars"] = getRating(thisVideo["id"]);
                     return res.json(thisVideo);
                 } else {
                     return res.status(404).json({error: 'Video not found'});
@@ -242,42 +322,60 @@ app.get('/video', async (req, res) => {
         return res.status(500).json({error: 'Internal server error'});
     }
 });
+
 let uses = {};
 let warnings = {};
+let commentUses = {};
+let commentWarnings = {};
+
 function modifyUses(ip,amt){
     if(uses[ip]==undefined)uses[ip]=0;
     uses[ip]+=amt;
 }
+
 function modifyWarnings(ip,amt){
     if(warnings[ip]==undefined)warnings[ip]=0;
     warnings[ip]+=amt;
 }
+
+function modifyCommentUses(ip,amt){
+    if(commentUses[ip]==undefined)commentUses[ip]=0;
+    commentUses[ip]+=amt;
+}
+
+function modifyCommentWarnings(ip,amt){
+    if(commentWarnings[ip]==undefined)commentWarnings[ip]=0;
+    commentWarnings[ip]+=amt;
+}
+
 function inNeighborhood(ip1, ip2, subnetMask) {
-  const parseIp = (ipString) => ipString.split('.').map(Number);
-  const parseSubnetMask = (maskString) => maskString.split('.').map(Number);
+  var parseIp = (ipString) => ipString.split('.').map(Number);
+  var parseSubnetMask = (maskString) => maskString.split('.').map(Number);
 
-  const ip1Octets = parseIp(ip1);
-  const ip2Octets = parseIp(ip2);
-  const maskOctets = parseSubnetMask(subnetMask);
+  var ip1Octets = parseIp(ip1);
+  var ip2Octets = parseIp(ip2);
+  var maskOctets = parseSubnetMask(subnetMask);
 
-  const networkAddress1 = ip1Octets.map((octet, i) => octet & maskOctets[i]);
-  const networkAddress2 = ip2Octets.map((octet, i) => octet & maskOctets[i]);
+  var networkAddress1 = ip1Octets.map((octet, i) => octet & maskOctets[i]);
+  var networkAddress2 = ip2Octets.map((octet, i) => octet & maskOctets[i]);
 
   return networkAddress1.every((val, i) => val === networkAddress2[i]);
 }
+
 function currentDate(){
     let d = new Date();
     return d.toDateString();
 }
+
 compileMostViewed();
 updateArchive();
 setInterval(() => {compileMostViewed();},30000);
-console.log(Utils.averageSet([3,4,3,1,1,1,5,3]));
 let viewCount = 0;
 setTimeout(() => {
 mostViewed.forEach(vid => {viewCount+=vid["views"];});
 console.log("GLOBAL VIEW COUNT "+viewCount);
 },3000);
+
 io.on("connection",socket => {
     socket.ip = socket.request.headers['x-forwarded-for'] == undefined ? "127.0.0.1" : socket.request.headers['x-forwarded-for'];
     if(socket.ip.includes(","))socket.ip = socket.ip.split(",")[0];
@@ -289,12 +387,115 @@ io.on("connection",socket => {
         socket.disconnect(true);
         return;
     }
+    
+    socket.on("getComments",data=>{
+        if(typeof data !== "object")return;
+        if(typeof data.videoId !== "string")return;
+        let comments = getComments(data.videoId);
+        socket.emit("comments",{videoId:data.videoId, comments:comments});
+    });
+    
+    socket.on("postComment",data=>{
+        modifyCommentUses(socket.ip,1);
+        setTimeout(() => {modifyCommentUses(socket.ip,-1);},10000);
+        
+        if(commentUses[socket.ip] > 5){
+            modifyCommentWarnings(socket.ip,1);
+            setTimeout(() => {modifyCommentWarnings(socket.ip,-1);},30000);
+            if(commentWarnings[socket.ip] > 3){
+                socket.disconnect(true);
+                return;
+            }
+            socket.emit("err","You are commenting too fast. Please slow down.");
+            return;
+        }
+        
+        if(typeof data !== "object")return;
+        if(typeof data.videoId !== "string")return;
+        if(typeof data.author !== "string")return;
+        if(typeof data.text !== "string")return;
+        
+        let sanitizedComment = {
+            author: Utils.sanitizeString(data.author).substring(0,28) || "Anonymous",
+            text: Utils.sanitizeString(data.text).substring(0,500),
+            timestamp: currentDate(),
+            id: Utils.newId(8),
+            likes: [],
+            dislikes: []
+        };
+        
+        saveComment(data.videoId, sanitizedComment);
+        socket.emit("commentPosted",{success:true});
+        
+        let comments = getComments(data.videoId);
+        io.emit("comments",{videoId:data.videoId, comments:comments});
+    });
+    
+    socket.on("deleteComment",data=>{
+        if(typeof data !== "object")return;
+        if(typeof data.videoId !== "string")return;
+        if(typeof data.commentId !== "string")return;
+        if(typeof data.password !== "string")return;
+        
+        if(data.password !== adminPass){
+            socket.emit("err","Invalid admin password");
+            return;
+        }
+        
+        let success = deleteComment(data.videoId, data.commentId);
+        
+        if(success){
+            let comments = getComments(data.videoId);
+            io.emit("comments",{videoId:data.videoId, comments:comments});
+            socket.emit("alert","Comment deleted successfully");
+        } else {
+            socket.emit("err","Comment not found");
+        }
+    });
+    
+    socket.on("likeComment",data=>{
+        if(typeof data !== "object")return;
+        if(typeof data.videoId !== "string")return;
+        if(typeof data.commentId !== "string")return;
+        if(typeof data.type !== "string")return;
+        if(data.type !== "like" && data.type !== "dislike")return;
+        
+        let success = likeComment(data.videoId, data.commentId, socket.ip, data.type);
+        
+        if(success){
+            let comments = getComments(data.videoId);
+            io.emit("comments",{videoId:data.videoId, comments:comments});
+        }
+    });
+    
+    socket.on("rate",data=>{
+        if(typeof data !== "object")return;
+        if(typeof data.id !== "string")return;
+        if(typeof data.rating !== "number")return;
+        if(data.rating > 5 || data.rating < 1)return;
+        
+        let video = Utils.getJSON('./user_cont/videos/'+data.id+'.json');
+        if(video == undefined)return;
+        
+        let filename = '$'+data.id.replace('#','')+'.json';
+        let filepath = './user_cont/ratings/'+filename;
+        
+        let currentRatings = Utils.getJSON(filepath) || {};
+        currentRatings[socket.ip] = Math.floor(data.rating);
+        
+        fs.writeFileSync(filepath, JSON.stringify(currentRatings), 'utf-8');
+        
+        let averageRating = getRating(data.id);
+        socket.emit("ratingUpdated",{videoId:data.id, rating:averageRating});
+    });
+    
     socket.on("home",data=>{
         if(data !== undefined && typeof data == "object"){
             let e = mostViewed.toSorted((a,b)=>b.date-a.date);
             socket.emit("home",{most:mostViewed,new:e});
         }
     });
+    
     socket.on("getIp",data=>{
         if(typeof data !== "object")return;
         if(data.id == undefined)return;
@@ -311,6 +512,7 @@ io.on("connection",socket => {
             socket.emit("getIp",videoContent["creator"]);
         }
     });
+    
     socket.on("banUsar",data=>{
         if(typeof data !== "object")return;
         if(data.id == undefined)return;
@@ -323,6 +525,7 @@ io.on("connection",socket => {
             fs.writeFileSync('./bans.js',JSON.stringify(bans),'utf-8');
             console.log("Ban success!")
     });
+    
     socket.on("delete",data=>{
         if(typeof data !== "object")return;
         if(data.id == undefined)return;
@@ -343,6 +546,7 @@ io.on("connection",socket => {
             socket.emit("home",{most:mostViewed,new:e});
         }
     });
+    
     socket.on("goto",data=>{
         if(data !== undefined && typeof data == "string"){
             let result = {};
@@ -371,6 +575,7 @@ io.on("connection",socket => {
             });
         }
     });
+    
     socket.on("ratings",data=>{
         if(typeof data !== "object")return;
         if(typeof data.id !== "string")return;
@@ -394,6 +599,7 @@ io.on("connection",socket => {
             }
         });
     });
+    
     socket.on("upload",data=>{
         modifyUses(socket.ip,1);
         setTimeout(() => {modifyUses(socket.ip,-1);},config.rateLimit*uses[socket.ip]);
@@ -422,7 +628,7 @@ io.on("connection",socket => {
         
         console.log(data.src == undefined || data.src == "");
         console.log(!whitelist.some(r => data.thumbnail.startsWith(r) && data.src.startsWith(r)));
-        //
+        
         if(data.title == undefined || data.title == "")data.title = "Untitled Video";
         console.log(data.src == undefined || data.src == "")
         if(data.src == undefined || data.src == ""){
@@ -436,7 +642,7 @@ io.on("connection",socket => {
             return;
         }
         if(!data.src.endsWith(".mp4") || !thumbnailforms.some(r => data.thumbnail.endsWith(r)))return;
-        //
+        
         console.log((!data.src.endsWith(".mp4") || !thumbnailforms.some(r => data.thumbnail.endsWith(r))));
         let localId = Utils.newId(10);
         let jeffys = ["jefy","jeffy","j3ffy"];
